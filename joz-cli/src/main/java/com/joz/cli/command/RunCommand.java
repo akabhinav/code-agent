@@ -1,18 +1,18 @@
 package com.joz.cli.command;
 
-import com.joz.cli.render.TerminalRenderer;
+import com.joz.cli.ui.Ansi;
+import com.joz.cli.ui.JozTerminalUI;
 import com.joz.common.config.ApprovalMode;
 import com.joz.common.config.JozConfig;
 import com.joz.common.config.LLMConfig;
 import com.joz.context.skill.Skill;
 import com.joz.context.skill.SkillLoader;
 import com.joz.core.AgentLoop;
+import com.joz.core.ConversationManager;
 import com.joz.core.PermissionManager;
 import com.joz.core.StreamEmitter;
-import com.joz.llm.LLMGateway;
 import com.joz.persistence.ConfigStore;
 import com.joz.persistence.SessionStore;
-import org.jline.reader.LineReader;
 import org.jline.reader.LineReaderBuilder;
 import org.jline.terminal.TerminalBuilder;
 import org.springframework.stereotype.Component;
@@ -22,7 +22,7 @@ import picocli.CommandLine.Option;
 import java.nio.file.Path;
 import java.util.Optional;
 
-/** Main run command — single-shot or interactive REPL. */
+/** Main run command — single-shot or interactive REPL with rich UI. */
 @Command(name = "run", description = "Run the JOz agent", mixinStandardHelpOptions = true)
 @Component
 public class RunCommand implements Runnable {
@@ -59,17 +59,20 @@ public class RunCommand implements Runnable {
 
     private final AgentLoop agentLoop;
     private final StreamEmitter emitter;
-    private final TerminalRenderer renderer;
+    private final JozTerminalUI ui;
     private final PermissionManager permissionManager;
     private final SkillLoader skillLoader;
+    private final ConversationManager conversationManager;
 
-    public RunCommand(AgentLoop agentLoop, StreamEmitter emitter, TerminalRenderer renderer,
-                      PermissionManager permissionManager, SkillLoader skillLoader) {
+    public RunCommand(AgentLoop agentLoop, StreamEmitter emitter, JozTerminalUI ui,
+                      PermissionManager permissionManager, SkillLoader skillLoader,
+                      ConversationManager conversationManager) {
         this.agentLoop = agentLoop;
         this.emitter = emitter;
-        this.renderer = renderer;
+        this.ui = ui;
         this.permissionManager = permissionManager;
         this.skillLoader = skillLoader;
+        this.conversationManager = conversationManager;
     }
 
     @Override
@@ -80,8 +83,6 @@ public class RunCommand implements Runnable {
         // Load config
         var configStore = new ConfigStore(globalConfigDir, projectRoot);
         var config = configStore.load();
-
-        // Apply CLI overrides
         config = applyOverrides(config);
 
         // Setup permissions
@@ -89,15 +90,15 @@ public class RunCommand implements Runnable {
         permissionManager.setAutoApproveAll(autoApprove);
         setupApprovalPrompt();
 
-        // Subscribe renderer to events
-        emitter.subscribe(renderer);
+        // Subscribe UI to agent events
+        emitter.subscribe(ui);
 
         // Load active skill
         Optional<Skill> activeSkill = Optional.empty();
         if (skillName != null) {
             activeSkill = skillLoader.load(skillName, projectRoot, globalConfigDir);
             if (activeSkill.isEmpty()) {
-                System.err.println("Skill not found: " + skillName);
+                System.err.println(Ansi.RED + "Skill not found: " + skillName + Ansi.RESET);
                 return;
             }
         }
@@ -108,43 +109,40 @@ public class RunCommand implements Runnable {
 
         String activeSessionId;
         boolean resumed = false;
+        int resumedMsgCount = 0;
 
         if (sessionId != null) {
-            // Resume specific session
-            activeSessionId = sessionId;
+            activeSessionId = resolveSessionId(sessionStore, sessionId);
+            if (activeSessionId == null) {
+                System.err.println(Ansi.RED + "Session not found: " + sessionId + Ansi.RESET);
+                sessionStore.close();
+                return;
+            }
             agentLoop.loadHistory(activeSessionId);
             resumed = true;
-            var msgCount = sessionStore.getMessageCount(activeSessionId);
-            System.out.printf("📂 Resumed session %s (%d messages)%n%n", activeSessionId.substring(0, 8), msgCount);
+            resumedMsgCount = sessionStore.getMessageCount(activeSessionId);
         } else if (resume) {
-            // Resume most recent session for this project
             var lastSession = sessionStore.getLastSession(projectRoot.toString());
             if (lastSession.isPresent()) {
                 activeSessionId = lastSession.get().id();
                 agentLoop.loadHistory(activeSessionId);
                 resumed = true;
-                var msgCount = sessionStore.getMessageCount(activeSessionId);
-                var title = lastSession.get().title();
-                System.out.printf("📂 Resumed session %s%s (%d messages)%n%n",
-                        activeSessionId.substring(0, 8),
-                        title != null ? " — " + title : "",
-                        msgCount);
+                resumedMsgCount = sessionStore.getMessageCount(activeSessionId);
             } else {
-                System.out.println("No previous session found. Starting new session.");
                 activeSessionId = sessionStore.createSession(projectRoot.toString());
             }
         } else {
             activeSessionId = sessionStore.createSession(projectRoot.toString());
         }
 
-        renderer.renderBanner(config.llm().model(), projectRoot.toString());
+        // Render welcome
+        ui.renderWelcome(config.llm().model(), projectRoot.toString(),
+                activeSessionId, resumed, resumedMsgCount);
 
         if (prompt != null) {
-            // Single-shot mode
             runSingleShot(config, projectRoot, globalConfigDir, activeSessionId, activeSkill);
         } else {
-            // Interactive REPL mode
-            runRepl(config, projectRoot, globalConfigDir, activeSessionId, activeSkill);
+            runRepl(config, projectRoot, globalConfigDir, activeSessionId, activeSkill, sessionStore);
         }
 
         sessionStore.close();
@@ -152,19 +150,21 @@ public class RunCommand implements Runnable {
 
     private void runSingleShot(JozConfig config, Path projectRoot, Path globalConfigDir,
                                 String sessionId, Optional<Skill> activeSkill) {
+        ui.onAgentStart();
         var options = new AgentLoop.RunOptions(
                 prompt, config, projectRoot, globalConfigDir, sessionId, activeSkill);
         agentLoop.run(options);
+        ui.onAgentEnd();
     }
 
     private void runRepl(JozConfig config, Path projectRoot, Path globalConfigDir,
-                          String sessionId, Optional<Skill> activeSkill) {
+                          String sessionId, Optional<Skill> activeSkill, SessionStore sessionStore) {
         try {
             var terminal = TerminalBuilder.builder().system(true).build();
             var lineReader = LineReaderBuilder.builder().terminal(terminal).build();
 
             while (true) {
-                renderer.renderPrompt();
+                ui.renderPrompt();
                 String line;
                 try {
                     line = lineReader.readLine();
@@ -172,32 +172,56 @@ public class RunCommand implements Runnable {
                     break;
                 }
 
-                if (line == null || line.strip().equalsIgnoreCase("/quit") ||
-                    line.strip().equalsIgnoreCase("/exit")) {
-                    System.out.println("Goodbye!");
+                if (line == null || line.strip().equalsIgnoreCase("/quit")
+                        || line.strip().equalsIgnoreCase("/exit")) {
+                    System.out.println();
+                    System.out.println(Ansi.DIM + "  Goodbye! Session saved: "
+                            + sessionId.substring(0, 8) + Ansi.RESET);
+                    System.out.println();
                     break;
                 }
 
                 if (line.isBlank()) continue;
 
-                if (line.strip().equalsIgnoreCase("/clear")) {
-                    System.out.print("\033[2J\033[H");
-                    renderer.renderBanner(config.llm().model(), projectRoot.toString());
+                var cmd = line.strip().toLowerCase();
+
+                if (cmd.equals("/clear")) {
+                    System.out.print(Ansi.CLEAR_SCREEN);
+                    ui.renderWelcome(config.llm().model(), projectRoot.toString(),
+                            sessionId, false, 0);
                     continue;
                 }
 
+                if (cmd.equals("/help")) {
+                    ui.renderHelp();
+                    continue;
+                }
+
+                if (cmd.equals("/history")) {
+                    ui.renderHistory(conversationManager.history());
+                    continue;
+                }
+
+                if (cmd.equals("/session")) {
+                    ui.renderSessionInfo(sessionId, projectRoot.toString(),
+                            sessionStore.getMessageCount(sessionId));
+                    continue;
+                }
+
+                // Normal prompt — run agent
+                ui.onAgentStart();
                 var options = new AgentLoop.RunOptions(
                         line.strip(), config, projectRoot, globalConfigDir, sessionId, activeSkill);
                 agentLoop.run(options);
+                ui.onAgentEnd();
             }
         } catch (Exception e) {
-            System.err.println("REPL error: " + e.getMessage());
+            System.err.println(Ansi.RED + "REPL error: " + e.getMessage() + Ansi.RESET);
         }
     }
 
     private void setupApprovalPrompt() {
         permissionManager.setApprovalPrompt(description -> {
-            renderer.renderApprovalPrompt(description);
             try {
                 var terminal = TerminalBuilder.builder().system(true).build();
                 var reader = LineReaderBuilder.builder().terminal(terminal).build();
@@ -205,7 +229,6 @@ public class RunCommand implements Runnable {
                 return switch (response) {
                     case "y", "yes", "" -> true;
                     case "a", "always" -> {
-                        // Extract tool name from description
                         var toolName = description.split("\n")[0].replace("Tool: ", "");
                         permissionManager.setToolOverride(toolName, ApprovalMode.AUTO_APPROVE);
                         yield true;
@@ -221,6 +244,16 @@ public class RunCommand implements Runnable {
                 return false;
             }
         });
+    }
+
+    private String resolveSessionId(SessionStore store, String shortId) {
+        var sessions = store.listSessions(100);
+        for (var session : sessions) {
+            if (session.id().startsWith(shortId)) {
+                return session.id();
+            }
+        }
+        return null;
     }
 
     private JozConfig applyOverrides(JozConfig config) {
