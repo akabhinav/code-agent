@@ -66,15 +66,30 @@ public class BashExecTool implements Tool {
             pb.environment().putAll(ctx.env());
             var process = pb.start();
 
-            var stdoutThread = Thread.ofVirtual().start(() -> {});
-            var stdout = new String(process.getInputStream().readNBytes(MAX_OUTPUT_BYTES));
-            var stderr = new String(process.getErrorStream().readNBytes(MAX_OUTPUT_BYTES));
+            // Read stdout/stderr in background threads to avoid blocking
+            var stdoutBuf = new StringBuilder();
+            var stderrBuf = new StringBuilder();
+            var stdoutReader = Thread.ofVirtual().start(() -> {
+                try { stdoutBuf.append(new String(process.getInputStream().readNBytes(MAX_OUTPUT_BYTES))); }
+                catch (IOException ignored) {}
+            });
+            var stderrReader = Thread.ofVirtual().start(() -> {
+                try { stderrBuf.append(new String(process.getErrorStream().readNBytes(MAX_OUTPUT_BYTES))); }
+                catch (IOException ignored) {}
+            });
 
             boolean finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
             if (!finished) {
                 process.destroyForcibly();
+                stdoutReader.interrupt();
+                stderrReader.interrupt();
                 return new ToolError("Command timed out after %d seconds".formatted(timeoutSeconds), ErrorKind.TIMEOUT);
             }
+
+            stdoutReader.join(5000);
+            stderrReader.join(5000);
+            var stdout = stdoutBuf.toString();
+            var stderr = stderrBuf.toString();
 
             int exitCode = process.exitValue();
             var output = new StringBuilder();

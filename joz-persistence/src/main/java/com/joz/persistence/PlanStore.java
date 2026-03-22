@@ -90,7 +90,7 @@ public class PlanStore implements AutoCloseable {
             stmt.setString(1, planId);
             var rs = stmt.executeQuery();
             if (rs.next()) {
-                var steps = mapper.readValue(rs.getString("steps"),
+                List<PlanStep> steps = mapper.readValue(rs.getString("steps"),
                         mapper.getTypeFactory().constructCollectionType(List.class, PlanStep.class));
                 return Optional.of(new Plan(
                         rs.getString("id"),
@@ -114,7 +114,7 @@ public class PlanStore implements AutoCloseable {
             stmt.setString(1, sessionId);
             var rs = stmt.executeQuery();
             while (rs.next()) {
-                var steps = mapper.readValue(rs.getString("steps"),
+                List<PlanStep> steps = mapper.readValue(rs.getString("steps"),
                         mapper.getTypeFactory().constructCollectionType(List.class, PlanStep.class));
                 plans.add(new Plan(
                         rs.getString("id"),

@@ -167,13 +167,9 @@ public class AgentLoop {
             return denied;
         }
 
-        // Execute on virtual thread
+        // Execute tool
         var ctx = new ExecutionContext(options.projectRoot(), options.sessionId(), Map.of());
         try {
-            var result = Thread.ofVirtual()
-                    .name("tool-" + toolCall.name())
-                    .start(() -> {})
-                    .join();
             var toolResult = tool.execute(toolCall.input(), ctx);
             emitter.emit(new ToolResultEvent(toolCall.id(), toolCall.name(), toolResult));
             return toolResult;
