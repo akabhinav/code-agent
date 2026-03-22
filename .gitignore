@@ -1,0 +1,19 @@
+target/
+*.class
+*.jar
+*.war
+*.log
+.joz/sessions.db
+.joz/logs/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.settings/
+.project
+.classpath
+
+# OS
+.DS_Store
+Thumbs.db
