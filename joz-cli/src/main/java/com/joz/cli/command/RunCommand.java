@@ -51,6 +51,12 @@ public class RunCommand implements Runnable {
     @Option(names = {"--local"}, description = "Use local Ollama instead of Claude")
     private boolean useLocal;
 
+    @Option(names = {"--resume", "-r"}, description = "Resume the most recent session for this project")
+    private boolean resume;
+
+    @Option(names = {"--session"}, description = "Resume a specific session by ID")
+    private String sessionId;
+
     private final AgentLoop agentLoop;
     private final StreamEmitter emitter;
     private final TerminalRenderer renderer;
@@ -96,18 +102,49 @@ public class RunCommand implements Runnable {
             }
         }
 
-        // Create session
+        // Create or resume session
         var sessionStore = new SessionStore(globalConfigDir.resolve("sessions.db"));
-        var sessionId = sessionStore.createSession(projectRoot.toString());
+        agentLoop.setSessionStore(sessionStore);
+
+        String activeSessionId;
+        boolean resumed = false;
+
+        if (sessionId != null) {
+            // Resume specific session
+            activeSessionId = sessionId;
+            agentLoop.loadHistory(activeSessionId);
+            resumed = true;
+            var msgCount = sessionStore.getMessageCount(activeSessionId);
+            System.out.printf("📂 Resumed session %s (%d messages)%n%n", activeSessionId.substring(0, 8), msgCount);
+        } else if (resume) {
+            // Resume most recent session for this project
+            var lastSession = sessionStore.getLastSession(projectRoot.toString());
+            if (lastSession.isPresent()) {
+                activeSessionId = lastSession.get().id();
+                agentLoop.loadHistory(activeSessionId);
+                resumed = true;
+                var msgCount = sessionStore.getMessageCount(activeSessionId);
+                var title = lastSession.get().title();
+                System.out.printf("📂 Resumed session %s%s (%d messages)%n%n",
+                        activeSessionId.substring(0, 8),
+                        title != null ? " — " + title : "",
+                        msgCount);
+            } else {
+                System.out.println("No previous session found. Starting new session.");
+                activeSessionId = sessionStore.createSession(projectRoot.toString());
+            }
+        } else {
+            activeSessionId = sessionStore.createSession(projectRoot.toString());
+        }
 
         renderer.renderBanner(config.llm().model(), projectRoot.toString());
 
         if (prompt != null) {
             // Single-shot mode
-            runSingleShot(config, projectRoot, globalConfigDir, sessionId, activeSkill);
+            runSingleShot(config, projectRoot, globalConfigDir, activeSessionId, activeSkill);
         } else {
             // Interactive REPL mode
-            runRepl(config, projectRoot, globalConfigDir, sessionId, activeSkill);
+            runRepl(config, projectRoot, globalConfigDir, activeSessionId, activeSkill);
         }
 
         sessionStore.close();

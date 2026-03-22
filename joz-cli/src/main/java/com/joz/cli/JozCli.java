@@ -20,7 +20,8 @@ import picocli.CommandLine.Command;
                 PlanCommand.class,
                 SkillCommand.class,
                 InitCommand.class,
-                ConfigCommand.class
+                ConfigCommand.class,
+                SessionCommand.class
         })
 public class JozCli implements CommandLineRunner {
 

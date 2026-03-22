@@ -125,6 +125,38 @@ public class SessionStore implements AutoCloseable {
         }
     }
 
+    /** Returns the most recent session for a project, if any. */
+    public Optional<SessionSummary> getLastSession(String projectRoot) {
+        try (var stmt = connection.prepareStatement(
+                "SELECT id, project_root, title, created_at, updated_at FROM sessions WHERE project_root = ? ORDER BY updated_at DESC LIMIT 1")) {
+            stmt.setString(1, projectRoot);
+            var rs = stmt.executeQuery();
+            if (rs.next()) {
+                return Optional.of(new SessionSummary(
+                        rs.getString("id"),
+                        rs.getString("project_root"),
+                        rs.getString("title"),
+                        rs.getString("created_at"),
+                        rs.getString("updated_at")));
+            }
+            return Optional.empty();
+        } catch (SQLException e) {
+            throw new JozException.SessionException("Failed to get last session", e);
+        }
+    }
+
+    /** Returns the message count for a session. */
+    public int getMessageCount(String sessionId) {
+        try (var stmt = connection.prepareStatement(
+                "SELECT COUNT(*) FROM messages WHERE session_id = ?")) {
+            stmt.setString(1, sessionId);
+            var rs = stmt.executeQuery();
+            return rs.next() ? rs.getInt(1) : 0;
+        } catch (SQLException e) {
+            throw new JozException.SessionException("Failed to count messages", e);
+        }
+    }
+
     /** Lists recent sessions. */
     public List<SessionSummary> listSessions(int limit) {
         var sessions = new ArrayList<SessionSummary>();

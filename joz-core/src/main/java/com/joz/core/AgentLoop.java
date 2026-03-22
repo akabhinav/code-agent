@@ -22,6 +22,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
+import com.joz.persistence.SessionStore;
+
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
@@ -42,6 +44,7 @@ public class AgentLoop {
     private final PermissionManager permissionManager;
     private final ConversationManager conversationManager;
     private final StreamEmitter emitter;
+    private SessionStore sessionStore;
 
     public AgentLoop(LLMGateway llmGateway, ToolRegistry toolRegistry,
                      ContextAssembler contextAssembler, PermissionManager permissionManager,
@@ -54,6 +57,11 @@ public class AgentLoop {
         this.emitter = emitter;
     }
 
+    /** Sets the session store for message persistence. */
+    public void setSessionStore(SessionStore sessionStore) {
+        this.sessionStore = sessionStore;
+    }
+
     /** Runs the agent loop for a single user prompt. */
     public void run(RunOptions options) {
         var startTime = Instant.now();
@@ -63,8 +71,10 @@ public class AgentLoop {
         var systemPrompt = contextAssembler.buildSystemPrompt(
                 options.projectRoot(), options.globalConfigDir(), options.activeSkill());
 
-        // Add user message to history
-        conversationManager.add(new UserMessage(options.prompt()));
+        // Add user message to history and persist
+        var userMsg = new UserMessage(options.prompt());
+        conversationManager.add(userMsg);
+        persist(options.sessionId(), userMsg);
 
         var toolDefs = toolRegistry.all().stream()
                 .map(t -> new ChatRequest.ToolDefinition(t.name(), t.description(), t.inputSchema()))
@@ -98,12 +108,16 @@ public class AgentLoop {
 
                 // If no tool calls, we're done
                 if (!response.hasToolCalls()) {
-                    conversationManager.add(new AssistantMessage(response.text(), List.of()));
+                    var assistantMsg = new AssistantMessage(response.text(), List.of());
+                    conversationManager.add(assistantMsg);
+                    persist(options.sessionId(), assistantMsg);
                     break;
                 }
 
                 // Process tool calls
-                conversationManager.add(new AssistantMessage(response.text(), response.toolCalls()));
+                var assistantMsg = new AssistantMessage(response.text(), response.toolCalls());
+                conversationManager.add(assistantMsg);
+                persist(options.sessionId(), assistantMsg);
 
                 boolean anyFileWritten = false;
 
@@ -121,7 +135,9 @@ public class AgentLoop {
                         case ToolSuccess(var output) -> output;
                         case ToolError(var error, var kind) -> "ERROR [%s]: %s".formatted(kind, error);
                     };
-                    conversationManager.add(new ToolResultMessage(toolCall.id(), toolCall.name(), resultText));
+                    var toolResultMsg = new ToolResultMessage(toolCall.id(), toolCall.name(), resultText);
+                    conversationManager.add(toolResultMsg);
+                    persist(options.sessionId(), toolResultMsg);
                 }
 
                 // Auto-commit if configured
@@ -204,6 +220,26 @@ public class AgentLoop {
             }
         } catch (Exception e) {
             log.warn("Auto-commit failed: {}", e.getMessage());
+        }
+    }
+
+    /** Loads conversation history from a previous session into the conversation manager. */
+    public void loadHistory(String sessionId) {
+        if (sessionStore == null) return;
+        var messages = sessionStore.getMessages(sessionId);
+        for (var message : messages) {
+            conversationManager.add(message);
+        }
+        log.info("Loaded {} messages from session {}", messages.size(), sessionId);
+    }
+
+    private void persist(String sessionId, Message message) {
+        if (sessionStore != null) {
+            try {
+                sessionStore.addMessage(sessionId, message);
+            } catch (Exception e) {
+                log.warn("Failed to persist message: {}", e.getMessage());
+            }
         }
     }
 
